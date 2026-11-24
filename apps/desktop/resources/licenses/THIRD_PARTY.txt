@@ -1,0 +1,7 @@
+﻿FFmpeg is licensed under the GNU General Public License (GPL) version 2 or later
+for this essentials build. Source code is available from https://ffmpeg.org and
+the build provider (gyan.dev). AudioRestorer AI redistributes FFmpeg under GPL
+with corresponding source offer.
+
+DeepFilterNet CLI is dual-licensed MIT / Apache-2.0.
+See https://github.com/Rikorose/DeepFilterNet

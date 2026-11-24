@@ -1,0 +1,22 @@
+{
+  "name": "audiorestorer-ai",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AudioRestorer AI monorepo",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "dev": "pnpm --filter @audiorestorer/desktop dev",
+    "build": "pnpm --filter @audiorestorer/desktop build",
+    "typecheck": "pnpm -r typecheck",
+    "engine:sync": "cd engine && uv sync",
+    "engine:serve": "cd engine && uv run audiorestorer-engine serve --port 8741",
+    "engine:process": "cd engine && uv run audiorestorer-engine process",
+    "fetch:binaries": "powershell -ExecutionPolicy Bypass -File packaging/fetch-binaries.ps1",
+    "build:engine": "powershell -ExecutionPolicy Bypass -File packaging/build-engine.ps1",
+    "release:win": "powershell -ExecutionPolicy Bypass -File packaging/release-win.ps1"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

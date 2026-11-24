@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --ink: #0e1210;
+  --panel: #171c19;
+  --sand: #e7e2d6;
+  --muted: #9aa39a;
+  --accent: #c4a35a;
+  --ok: #6fbf8a;
+  --warn: #d4a017;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "IBM Plex Sans", system-ui, sans-serif;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(196, 163, 90, 0.12), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(111, 191, 138, 0.08), transparent 55%),
+    var(--ink);
+  color: var(--sand);
+}
+
+.bg-ink {
+  background: transparent;
+}
+.text-sand {
+  color: var(--sand);
+}

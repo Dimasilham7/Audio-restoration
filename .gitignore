@@ -1,0 +1,115 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# uv / Python tooling
+engine/.venv/
+engine/.python-version
+**/.venv/
+uv.lock
+!.uv/
+# Keep engine pin tracked
+!engine/.python-version
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# IDE / editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Build / packaging
+out/
+release/
+apps/desktop/release/
+apps/desktop/resources/bin/
+apps/desktop/resources/engine/
+engine/dist/
+engine/build/
+*.asar
+*.msi
+*.dmg
+*.AppImage
+*.nsis
+*.blockmap
+# Keep source trees; ignore downloaded/frozen binaries above
+# (do not ignore packaging scripts)
+
+# Electron
+.electron/
+electron-builder.yml.bak
+
+# App data / local runtime (never commit)
+.runtime/
+.models/
+!.models/.gitkeep
+.tmp/
+tmp/
+temp/
+cache/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Media and evaluation assets (large / private)
+eval/datasets/
+eval/audio/
+eval/output/
+*.wav
+*.flac
+*.mp3
+*.aac
+*.m4a
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+!docs/**/*.png
+!docs/**/*.svg
+
+# Logs and coverage
+logs/
+*.log
+coverage/
+.nyc_output/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# OS
+ehthumbs.db
+$RECYCLE.BIN/
+
+# Cursor / agent local
+.cursor/
+agent-transcripts/
+
+# TypeScript incremental
+*.tsbuildinfo

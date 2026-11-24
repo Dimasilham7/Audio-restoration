@@ -1,0 +1,40 @@
+appId: com.audiorestorer.ai
+productName: AudioRestorer AI
+copyright: Copyright © AudioRestorer AI
+directories:
+  output: release
+  buildResources: build
+files:
+  - "out/**"
+  - "package.json"
+extraResources:
+  - from: resources/engine
+    to: engine
+    filter:
+      - "**/*"
+  - from: resources/bin
+    to: bin
+    filter:
+      - "**/*"
+  - from: resources/licenses
+    to: licenses
+    filter:
+      - "**/*"
+asar: true
+win:
+  signAndEditExecutable: false
+  signingHashAlgorithms: null
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: AudioRestorer-AI-${version}-${os}-${arch}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AudioRestorer AI
+portable:
+  artifactName: AudioRestorer-AI-${version}-portable.exe
