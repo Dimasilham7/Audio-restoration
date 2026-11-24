@@ -5,6 +5,8 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +14,7 @@ import numpy as np
 import soundfile as sf
 
 from audiorestorer_engine.io.audio import match_length, read_audio
+from audiorestorer_engine.pipeline.progress import CancelledError
 
 
 def _write_pcm16_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
@@ -48,6 +51,7 @@ def enhance(
     atten_lim_db: float = 12.0,
     compensate_delay: bool = True,
     work_dir: str | Path | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> np.ndarray:
     """
     Run DeepFilterNet3 on float32 audio (channels, samples).
@@ -102,16 +106,26 @@ def enhance(
             cmd.append("-D")
         cmd.append(str(in_wav))
 
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            check=False,
             shell=False,
         )
+        while proc.poll() is None:
+            if is_cancelled and is_cancelled():
+                proc.kill()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise CancelledError("DeepFilterNet cancelled")
+            time.sleep(0.05)
+        stderr = proc.stderr.read() if proc.stderr else ""
         if proc.returncode != 0 or not out_wav.is_file():
             raise DeepFilterNetError(
-                f"DeepFilterNet failed ({proc.returncode}): {proc.stderr[-2000:]}"
+                f"DeepFilterNet failed ({proc.returncode}): {stderr[-2000:]}"
             )
 
         enhanced, sr = read_audio(out_wav)

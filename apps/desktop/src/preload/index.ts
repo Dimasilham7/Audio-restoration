@@ -25,6 +25,12 @@ export type DesktopApi = {
   }>;
   ensureOutputDir: (dir?: string) => Promise<string>;
   toMediaUrl: (filePath: string) => string;
+  listProjects: () => Promise<Record<string, unknown>[]>;
+  createProject: (name: string, rootPath: string) => Promise<Record<string, unknown>>;
+  listModels: () => Promise<Record<string, unknown>[]>;
+  schemaVersions: () => Promise<number[]>;
+  getSettings: () => Promise<Record<string, unknown>>;
+  setSettings: (partial: Record<string, unknown>) => Promise<Record<string, unknown>>;
 };
 
 const api: DesktopApi = {
@@ -45,6 +51,12 @@ const api: DesktopApi = {
   appInfo: () => ipcRenderer.invoke("app:info"),
   ensureOutputDir: (dir) => ipcRenderer.invoke("app:ensureOutputDir", dir),
   toMediaUrl: (filePath) => `media://local/?path=${encodeURIComponent(filePath)}`,
+  listProjects: () => ipcRenderer.invoke("db:listProjects"),
+  createProject: (name, rootPath) => ipcRenderer.invoke("db:createProject", { name, rootPath }),
+  listModels: () => ipcRenderer.invoke("db:listModels"),
+  schemaVersions: () => ipcRenderer.invoke("db:schemaVersions"),
+  getSettings: () => ipcRenderer.invoke("db:getSettings"),
+  setSettings: (partial) => ipcRenderer.invoke("db:setSettings", partial),
 };
 
 contextBridge.exposeInMainWorld("audiorestorer", api);

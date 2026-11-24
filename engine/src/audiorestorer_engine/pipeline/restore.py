@@ -101,12 +101,15 @@ def apply_plan(
         p = enabled[StageId.denoise_speech].params
         atten = float(p.get("atten_lim_db", 12.0))
         dry = out
+        ctx.check()
         wet = dfn_enhance(
             out,
             sample_rate,
             atten_lim_db=atten,
             compensate_delay=bool(p.get("compensate_delay", True)),
+            is_cancelled=ctx.is_cancelled,
         )
+        ctx.check()
         if p.get("gate_with_vad", False):
             mask = speech_activity_mask(dry, sample_rate)
             out = mix_wet_dry(dry, wet, mask)

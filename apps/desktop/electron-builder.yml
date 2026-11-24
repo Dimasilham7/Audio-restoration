@@ -20,6 +20,10 @@ extraResources:
     to: licenses
     filter:
       - "**/*"
+  - from: resources/migrations
+    to: migrations
+    filter:
+      - "**/*"
 asar: true
 win:
   signAndEditExecutable: false

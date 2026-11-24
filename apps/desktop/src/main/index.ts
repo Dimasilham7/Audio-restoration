@@ -5,6 +5,16 @@ import { pathToFileURL } from "node:url";
 import { cancelJob, createJob, getJob, watchJob } from "./jobs";
 import { ensureEngine, stopEngine } from "./engineSupervisor";
 import { defaultOutputDir, engineDir, repoRoot } from "./paths";
+import {
+  closeDb,
+  createProject,
+  getSetting,
+  initDb,
+  listModels,
+  listProjects,
+  schemaVersions,
+  setSetting,
+} from "./db";
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -52,7 +62,9 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await initDb();
+
   protocol.handle("media", (request) => {
     try {
       const url = new URL(request.url);
@@ -157,6 +169,28 @@ app.whenReady().then(() => {
     return out;
   });
 
+  ipcMain.handle("db:listProjects", async () => listProjects());
+  ipcMain.handle("db:createProject", async (_e, payload: { name: string; rootPath: string }) =>
+    createProject(payload.name, payload.rootPath),
+  );
+  ipcMain.handle("db:listModels", async () => listModels());
+  ipcMain.handle("db:schemaVersions", async () => schemaVersions());
+  ipcMain.handle("db:getSettings", async () => ({
+    preset: getSetting("preset", "balanced"),
+    loudness: getSetting("loudness", -16),
+    device: getSetting("device", "auto"),
+    strength: getSetting("strength", 0.6),
+  }));
+  ipcMain.handle("db:setSettings", async (_e, partial: Record<string, unknown>) => {
+    for (const [k, v] of Object.entries(partial)) setSetting(k, v);
+    return {
+      preset: getSetting("preset", "balanced"),
+      loudness: getSetting("loudness", -16),
+      device: getSetting("device", "auto"),
+      strength: getSetting("strength", 0.6),
+    };
+  });
+
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -165,11 +199,13 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   stopEngine();
+  closeDb();
   if (process.platform !== "darwin") app.quit();
 });
 
 app.on("before-quit", () => {
   stopEngine();
+  closeDb();
 });
 
 async function netFetchFile(filePath: string): Promise<Response> {

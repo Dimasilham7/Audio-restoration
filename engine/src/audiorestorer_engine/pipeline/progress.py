@@ -24,6 +24,9 @@ class JobContext:
             raise CancelledError("Job cancelled")
         if self.progress:
             self.progress(max(0.0, min(1.0, progress)), stage, message)
+        # Allow UI cancel handlers that flip the flag inside the progress callback
+        if self.is_cancelled():
+            raise CancelledError("Job cancelled")
 
     def check(self) -> None:
         if self.is_cancelled():

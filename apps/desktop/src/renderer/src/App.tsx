@@ -1,45 +1,48 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  type AnalysisSnapshot,
+  type PlanStage,
+  type Preset,
+  type QueueItem,
+  type ScreenId,
+  basename,
+  confidenceBadge,
+  stem,
+} from "./types";
 
-type Preset = "natural" | "balanced" | "enhanced";
-
-type QueueItem = {
-  id: string;
-  path: string;
-  name: string;
-  jobId?: string;
-  state: "idle" | "queued" | "running" | "completed" | "failed" | "cancelled";
-  progress: number;
-  stage: string;
-  message: string;
-  dfn?: boolean;
-  label?: string;
-  outputPath?: string;
-  error?: string;
-  restoredWav?: string;
-  extractedWav?: string;
-};
-
-function basename(p: string) {
-  return p.replace(/\\/g, "/").split("/").pop() ?? p;
-}
-
-function stem(p: string) {
-  const n = basename(p);
-  const i = n.lastIndexOf(".");
-  return i >= 0 ? n.slice(0, i) : n;
-}
+const NAV: { id: ScreenId; label: string }[] = [
+  { id: "welcome", label: "Welcome" },
+  { id: "import", label: "Import" },
+  { id: "analysis", label: "Analysis" },
+  { id: "diagnosis", label: "Diagnosis" },
+  { id: "restore", label: "Restore" },
+  { id: "ab", label: "A/B" },
+  { id: "export", label: "Export" },
+  { id: "models", label: "Models" },
+  { id: "settings", label: "Settings" },
+];
 
 export default function App() {
+  const [screen, setScreen] = useState<ScreenId>("welcome");
   const [items, setItems] = useState<QueueItem[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [preset, setPreset] = useState<Preset>("balanced");
   const [strength, setStrength] = useState(0.6);
   const [loudness, setLoudness] = useState(-16);
+  const [speechClarity, setSpeechClarity] = useState(0.5);
+  const [ambience, setAmbience] = useState(0.5);
+  const [noiseReduction, setNoiseReduction] = useState(0.6);
   const [outputDir, setOutputDir] = useState("");
   const [busy, setBusy] = useState(false);
   const [engineReady, setEngineReady] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [projects, setProjects] = useState<Record<string, unknown>[]>([]);
+  const [models, setModels] = useState<Record<string, unknown>[]>([]);
+  const [schemaVersions, setSchemaVersions] = useState<number[]>([]);
+  const [device, setDevice] = useState("auto");
   const [abMode, setAbMode] = useState<"A" | "B">("B");
   const [loudnessMatch, setLoudnessMatch] = useState(true);
+  const [advanced, setAdvanced] = useState(false);
+  const [toasts, setToasts] = useState<string[]>([]);
   const audioRef = useRef<HTMLAudioElement>(null);
   const cancelAllRef = useRef(false);
 
@@ -47,14 +50,27 @@ export default function App() {
     () => items.find((i) => i.id === selectedId) ?? null,
     [items, selectedId],
   );
+  const contentLabel = selected?.label ?? "mixed";
+
+  function toast(msg: string) {
+    setToasts((t) => [msg, ...t].slice(0, 4));
+  }
 
   useEffect(() => {
-    void window.audiorestorer.appInfo().then(async (info) => {
+    void (async () => {
+      const info = await window.audiorestorer.appInfo();
       const out = await window.audiorestorer.ensureOutputDir(info.defaultOutputDir);
       setOutputDir(out);
       setEngineReady(true);
-    });
-    const off = window.audiorestorer.onJobProgress((data) => {
+      setProjects(await window.audiorestorer.listProjects());
+      setModels(await window.audiorestorer.listModels());
+      setSchemaVersions(await window.audiorestorer.schemaVersions());
+      const settings = await window.audiorestorer.getSettings();
+      if (settings.preset) setPreset(settings.preset as Preset);
+      if (typeof settings.loudness === "number") setLoudness(settings.loudness);
+      if (typeof settings.device === "string") setDevice(settings.device);
+    })();
+    return window.audiorestorer.onJobProgress((data) => {
       const jobId = String(data.job_id ?? "");
       setItems((prev) =>
         prev.map((it) => {
@@ -77,8 +93,17 @@ export default function App() {
         }),
       );
     });
-    return off;
   }, []);
+
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || !selected?.restoredWav) return;
+    const path =
+      abMode === "B"
+        ? selected.restoredWav
+        : selected.restoredWav.replace(/restored\.wav$/i, "extracted.wav");
+    el.src = window.audiorestorer.toMediaUrl(path);
+  }, [abMode, selected, loudnessMatch]);
 
   function upsertFiles(paths: string[]) {
     setItems((prev) => {
@@ -98,11 +123,25 @@ export default function App() {
       }
       return next;
     });
+    if (paths[0]) setSelectedId((id) => id ?? crypto.randomUUID());
   }
 
   async function onImportFiles() {
     const paths = await window.audiorestorer.openMedia();
     upsertFiles(paths);
+    if (paths.length) {
+      setSelectedId(
+        (prev) => items.find((i) => i.path === paths[0])?.id ?? prev ?? crypto.randomUUID(),
+      );
+      // re-resolve after state update via path
+      setItems((prev) => {
+        const match = prev.find((i) => i.path === paths[0]);
+        if (match) setSelectedId(match.id);
+        return prev;
+      });
+      setScreen("import");
+      toast(`Imported ${paths.length} file(s)`);
+    }
   }
 
   async function onImportFolder() {
@@ -110,13 +149,65 @@ export default function App() {
     if (!folder) return;
     const paths = await window.audiorestorer.listMediaInFolder(folder);
     upsertFiles(paths);
+    setScreen("import");
+    toast(`Imported folder (${paths.length} media)`);
   }
 
-  async function onChooseOutput() {
-    const dir = await window.audiorestorer.chooseOutput();
-    if (dir) {
-      await window.audiorestorer.ensureOutputDir(dir);
-      setOutputDir(dir);
+  async function createProject() {
+    const folder = await window.audiorestorer.openFolder();
+    if (!folder) return;
+    const name = basename(folder);
+    await window.audiorestorer.createProject(name, folder);
+    setProjects(await window.audiorestorer.listProjects());
+    toast(`Project “${name}” created`);
+  }
+
+  async function analyzeSelected() {
+    if (!selected) return;
+    setBusy(true);
+    setScreen("analysis");
+    try {
+      const job = await window.audiorestorer.createJob({
+        kind: "analyze",
+        mediaPath: selected.path,
+      });
+      const jobId = String(job.id);
+      setItems((prev) =>
+        prev.map((it) => (it.id === selected.id ? { ...it, jobId, state: "running" } : it)),
+      );
+      const finalJob = await window.audiorestorer.watchJob(jobId);
+      const result = finalJob.result as {
+        analysis?: Record<string, unknown>;
+        plan?: { stages?: PlanStage[] };
+      };
+      const analysisRaw = result?.analysis ?? {};
+      const issues = (analysisRaw.issues as AnalysisSnapshot["issues"]) ?? [];
+      const timeline = analysisRaw.timeline as AnalysisSnapshot["timeline"];
+      const gm = analysisRaw.global_metrics as { loudness?: AnalysisSnapshot["loudness"] };
+      setItems((prev) =>
+        prev.map((it) =>
+          it.id === selected.id
+            ? {
+                ...it,
+                state: "completed",
+                progress: 1,
+                analysis: {
+                  issues,
+                  timeline,
+                  loudness: gm?.loudness,
+                },
+                planStages: result?.plan?.stages ?? [],
+                label: timeline?.[0]?.label,
+              }
+            : it,
+        ),
+      );
+      setScreen("diagnosis");
+      toast("Analysis complete — review diagnosis");
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -124,22 +215,13 @@ export default function App() {
     if (!items.length || busy) return;
     setBusy(true);
     cancelAllRef.current = false;
+    setScreen("restore");
     const out = await window.audiorestorer.ensureOutputDir(outputDir || undefined);
     setOutputDir(out);
-
     for (const item of items) {
       if (cancelAllRef.current) break;
-      if (item.state === "completed") continue;
-
+      if (item.state === "completed" && item.outputPath) continue;
       const outputPath = `${out}\\${stem(item.path)}.restored.mp4`;
-      setItems((prev) =>
-        prev.map((it) =>
-          it.id === item.id
-            ? { ...it, state: "queued", progress: 0, message: "Starting…", outputPath }
-            : it,
-        ),
-      );
-
       try {
         const job = await window.audiorestorer.createJob({
           kind: "process",
@@ -149,22 +231,23 @@ export default function App() {
             preset,
             strength,
             loudness_target_lufs: loudness,
+            noise_reduction: noiseReduction,
           },
         });
         const jobId = String(job.id);
         setItems((prev) =>
-          prev.map((it) => (it.id === item.id ? { ...it, jobId, state: "running" } : it)),
+          prev.map((it) =>
+            it.id === item.id ? { ...it, jobId, state: "running", outputPath } : it,
+          ),
         );
         const finalJob = await window.audiorestorer.watchJob(jobId);
-        const result = finalJob.result as
-          | {
-              stages_applied?: string[];
-              analysis?: { timeline?: { label?: string }[] };
-              output_audio_path?: string;
-              output_media_path?: string;
-            }
-          | undefined;
-        const stages = result?.stages_applied ?? [];
+        const result = finalJob.result as {
+          stages_applied?: string[];
+          analysis?: { timeline?: { label?: string }[]; issues?: AnalysisSnapshot["issues"] };
+          plan?: { stages?: PlanStage[] };
+          output_audio_path?: string;
+          output_media_path?: string;
+        };
         setItems((prev) =>
           prev.map((it) =>
             it.id === item.id
@@ -172,10 +255,17 @@ export default function App() {
                   ...it,
                   state: String(finalJob.state) as QueueItem["state"],
                   progress: Number(finalJob.progress ?? 1),
-                  dfn: stages.includes("denoise_speech"),
+                  dfn: (result?.stages_applied ?? []).includes("denoise_speech"),
                   label: result?.analysis?.timeline?.[0]?.label,
                   outputPath: result?.output_media_path ?? outputPath,
                   restoredWav: result?.output_audio_path,
+                  analysis: result?.analysis
+                    ? {
+                        issues: result.analysis.issues ?? [],
+                        timeline: result.analysis.timeline,
+                      }
+                    : it.analysis,
+                  planStages: result?.plan?.stages ?? it.planStages,
                   error: finalJob.error ? String(finalJob.error) : undefined,
                 }
               : it,
@@ -184,277 +274,369 @@ export default function App() {
       } catch (err) {
         setItems((prev) =>
           prev.map((it) =>
-            it.id === item.id
-              ? { ...it, state: "failed", error: String(err), message: String(err) }
-              : it,
+            it.id === item.id ? { ...it, state: "failed", error: String(err) } : it,
           ),
         );
       }
     }
     setBusy(false);
+    setScreen("ab");
+    toast("Batch finished");
   }
 
-  async function cancelSelected() {
-    if (!selected?.jobId) return;
-    await window.audiorestorer.cancelJob(selected.jobId);
+  async function saveSettings() {
+    await window.audiorestorer.setSettings({ preset, loudness, device, strength });
+    toast("Settings saved");
   }
 
-  function cancelAll() {
-    cancelAllRef.current = true;
-    for (const it of items) {
-      if (it.jobId && (it.state === "running" || it.state === "queued")) {
-        void window.audiorestorer.cancelJob(it.jobId);
-      }
-    }
-  }
-
-  useEffect(() => {
-    const el = audioRef.current;
-    if (!el || !selected) return;
-    if (abMode === "B" && selected.restoredWav) {
-      el.src = window.audiorestorer.toMediaUrl(selected.restoredWav);
-      el.volume = loudnessMatch ? 1 : 1;
-    } else if (abMode === "A") {
-      // Prefer extracted wav from work dir convention if present
-      const guess = selected.restoredWav
-        ? selected.restoredWav.replace(/restored\.wav$/i, "extracted.wav")
-        : "";
-      if (guess) el.src = window.audiorestorer.toMediaUrl(guess);
-    }
-  }, [abMode, selected, loudnessMatch]);
-
-  const stats = useMemo(() => {
-    const total = items.length;
-    const done = items.filter((i) => i.state === "completed").length;
-    const failed = items.filter((i) => i.state === "failed").length;
-    const dfn = items.filter((i) => i.dfn).length;
-    return { total, done, failed, dfn };
-  }, [items]);
+  const showSpeech = contentLabel !== "music_dominant" || advanced;
+  const showMusic = contentLabel !== "speech_dominant" || advanced;
 
   return (
     <div className="min-h-full flex flex-col">
-      <header className="px-8 pt-7 pb-3 flex items-end justify-between gap-6">
+      <header className="px-6 pt-5 pb-3 flex items-end justify-between gap-4 border-b border-white/5">
         <div>
           <p className="text-[11px] tracking-[0.22em] uppercase text-[#9aa39a]">
-            Windows · Offline · {engineReady ? "Engine ready" : "Starting engine…"}
+            Offline · {engineReady ? "Engine ready" : "Starting…"} · SQLite{" "}
+            {schemaVersions.length ? `v${schemaVersions.join(",")}` : "…"}
           </p>
-          <h1 className="text-3xl font-semibold tracking-tight text-[#e7e2d6] mt-1">
+          <h1 className="text-2xl font-semibold tracking-tight text-[#e7e2d6] mt-1">
             AudioRestorer <span className="text-[#c4a35a]">AI</span>
           </h1>
         </div>
-        <div className="text-right text-xs text-[#9aa39a]">
-          <div>
-            {stats.done}/{stats.total} done · {stats.failed} failed · DFN {stats.dfn}
-          </div>
+        <div className="flex flex-wrap gap-1 justify-end max-w-[55%]">
+          {NAV.map((n) => (
+            <button
+              key={n.id}
+              type="button"
+              onClick={() => setScreen(n.id)}
+              className={`text-xs px-2.5 py-1.5 rounded-lg ${
+                screen === n.id ? "bg-[#c4a35a] text-[#0e1210] font-semibold" : "border border-white/10"
+              }`}
+            >
+              {n.label}
+            </button>
+          ))}
         </div>
       </header>
 
-      <main className="flex-1 px-8 pb-8 grid grid-cols-1 xl:grid-cols-[1.15fr_0.85fr] gap-5">
-        <section className="rounded-2xl border border-white/10 bg-[#171c19]/90 p-5 flex flex-col gap-4 min-h-[520px]">
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => void onImportFiles()}
-              className="rounded-lg bg-[#c4a35a] text-[#0e1210] px-3 py-2 text-sm font-semibold"
-            >
-              Add files
-            </button>
-            <button
-              type="button"
-              onClick={() => void onImportFolder()}
-              className="rounded-lg border border-white/15 px-3 py-2 text-sm"
-            >
-              Add folder
-            </button>
-            <button
-              type="button"
-              onClick={() => void processQueue()}
-              disabled={!items.length || busy}
-              className="rounded-lg bg-[#6fbf8a] text-[#0e1210] px-3 py-2 text-sm font-semibold disabled:opacity-40"
-            >
-              Process all
-            </button>
-            <button
-              type="button"
-              onClick={cancelAll}
-              disabled={!busy}
-              className="rounded-lg border border-red-400/40 text-red-200 px-3 py-2 text-sm disabled:opacity-40"
-            >
-              Cancel all
-            </button>
-            <button
-              type="button"
-              onClick={() => void onChooseOutput()}
-              className="rounded-lg border border-white/15 px-3 py-2 text-sm"
-            >
-              Output folder
-            </button>
-          </div>
+      {toasts.length ? (
+        <div className="px-6 pt-2 space-y-1">
+          {toasts.map((t, i) => (
+            <div key={`${t}-${i}`} className="text-xs text-[#c4a35a] bg-[#c4a35a]/10 rounded px-3 py-1">
+              {t}
+            </div>
+          ))}
+        </div>
+      ) : null}
 
-          <div className="text-xs text-[#9aa39a] break-all">Output: {outputDir || "…"}</div>
+      <main className="flex-1 px-6 py-5 overflow-auto">
+        {screen === "welcome" && (
+          <section className="space-y-4 max-w-4xl">
+            <p className="text-[#9aa39a] text-sm">
+              Local-first restoration. Import media, review honest diagnosis, restore, A/B, export.
+            </p>
+            <div className="flex gap-2">
+              <button type="button" className="rounded-lg bg-[#c4a35a] text-[#0e1210] px-4 py-2 font-semibold" onClick={() => void onImportFiles()}>
+                Import media
+              </button>
+              <button type="button" className="rounded-lg border border-white/15 px-4 py-2" onClick={() => void createProject()}>
+                New project
+              </button>
+              <button type="button" className="rounded-lg border border-white/15 px-4 py-2" onClick={() => setScreen("models")}>
+                Models
+              </button>
+            </div>
+            <div>
+              <h2 className="text-sm uppercase tracking-wide text-[#9aa39a] mb-2">Recent projects</h2>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {projects.map((p) => (
+                  <div key={String(p.id)} className="rounded-xl border border-white/10 p-3">
+                    <div className="font-medium">{String(p.name)}</div>
+                    <div className="text-xs text-[#9aa39a] break-all">{String(p.root_path)}</div>
+                  </div>
+                ))}
+                {!projects.length ? <p className="text-sm text-[#9aa39a]">No projects yet.</p> : null}
+              </div>
+            </div>
+            <div className="flex gap-2 text-xs">
+              <span className="px-2 py-1 rounded bg-[#6fbf8a]/15 text-[#6fbf8a]">Engine {engineReady ? "running" : "…"}</span>
+              <span className="px-2 py-1 rounded bg-white/10">Device {device.toUpperCase()}</span>
+              <span className="px-2 py-1 rounded bg-white/10">Models {models.filter((m) => m.state === "installed").length}/{models.length}</span>
+            </div>
+          </section>
+        )}
 
-          <div className="grid grid-cols-3 gap-3">
-            <label className="text-sm">
-              <span className="text-[#9aa39a]">Preset</span>
-              <select
-                className="mt-1 w-full rounded-lg bg-[#0e1210] border border-white/10 px-2 py-2"
-                value={preset}
-                onChange={(e) => setPreset(e.target.value as Preset)}
-              >
+        {screen === "import" && (
+          <section className="space-y-4">
+            <div className="flex gap-2">
+              <button type="button" className="rounded-lg bg-[#c4a35a] text-[#0e1210] px-3 py-2 text-sm font-semibold" onClick={() => void onImportFiles()}>Add files</button>
+              <button type="button" className="rounded-lg border border-white/15 px-3 py-2 text-sm" onClick={() => void onImportFolder()}>Add folder</button>
+              <button type="button" className="rounded-lg bg-[#6fbf8a] text-[#0e1210] px-3 py-2 text-sm font-semibold disabled:opacity-40" disabled={!selected} onClick={() => void analyzeSelected()}>Continue → Analyze</button>
+            </div>
+            <ul className="space-y-2">
+              {items.map((it) => (
+                <li key={it.id}>
+                  <button type="button" onClick={() => setSelectedId(it.id)} className={`w-full text-left rounded-xl border px-3 py-2 ${selectedId === it.id ? "border-[#c4a35a] bg-white/5" : "border-white/10"}`}>
+                    <div className="text-sm">{it.name}</div>
+                    <div className="text-xs text-[#9aa39a] break-all">{it.path}</div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {screen === "analysis" && (
+          <section className="space-y-4 max-w-3xl">
+            <h2 className="text-lg">Analysis workspace</h2>
+            <p className="text-sm text-[#9aa39a]">Video is not decoded in-app (4K HEVC). Waveform uses extracted audio after restore.</p>
+            {selected ? (
+              <>
+                <div className="text-sm">{selected.name}</div>
+                <div className="h-2 rounded bg-black/40 overflow-hidden">
+                  <div className="h-full bg-[#6fbf8a]" style={{ width: `${Math.round(selected.progress * 100)}%` }} />
+                </div>
+                <div className="text-xs text-[#9aa39a]">{selected.stage || selected.message || "Idle"}</div>
+                <button type="button" className="rounded-lg bg-[#6fbf8a] text-[#0e1210] px-3 py-2 text-sm font-semibold disabled:opacity-40" disabled={busy} onClick={() => void analyzeSelected()}>
+                  {busy ? "Running…" : "Run analysis"}
+                </button>
+              </>
+            ) : (
+              <p className="text-sm text-[#9aa39a]">Import a file first.</p>
+            )}
+          </section>
+        )}
+
+        {screen === "diagnosis" && (
+          <section className="space-y-4 max-w-3xl">
+            <h2 className="text-lg">Diagnosis</h2>
+            {selected?.analysis ? (
+              <>
+                <div className="text-sm">
+                  Content: <span className="text-[#c4a35a]">{selected.label ?? "unknown"}</span>
+                  {selected.analysis.timeline?.[0]?.content ? (
+                    <span className="text-[#9aa39a] ml-2 text-xs">
+                      speech={Number(selected.analysis.timeline[0].content.speech ?? 0).toFixed(2)} · music=
+                      {Number(selected.analysis.timeline[0].content.music ?? 0).toFixed(2)}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="space-y-2">
+                  {selected.analysis.issues.map((issue) => {
+                    const conf = confidenceBadge(issue.confidence);
+                    return (
+                      <div key={issue.id} className="rounded-xl border border-white/10 p-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium capitalize">{issue.id.replaceAll("_", " ")}</span>
+                          <span className={`text-[11px] px-2 py-0.5 rounded ${conf.className}`}>Confidence {conf.label}</span>
+                          <span className="text-[11px] px-2 py-0.5 rounded bg-white/10 capitalize">{issue.recoverability}</span>
+                        </div>
+                        <p className="text-sm text-[#9aa39a] mt-1">{issue.user_message}</p>
+                      </div>
+                    );
+                  })}
+                  {!selected.analysis.issues.length ? <p className="text-sm text-[#9aa39a]">No major issues flagged.</p> : null}
+                </div>
+                <div>
+                  <h3 className="text-sm text-[#9aa39a] mb-1">Recommended stages</h3>
+                  <ul className="text-sm space-y-1">
+                    {(selected.planStages ?? []).filter((s) => s.enabled).map((s) => (
+                      <li key={s.id}>• {s.id}: {s.reason}</li>
+                    ))}
+                  </ul>
+                </div>
+                <button type="button" className="rounded-lg bg-[#6fbf8a] text-[#0e1210] px-3 py-2 text-sm font-semibold" onClick={() => setScreen("restore")}>
+                  Continue with {preset}
+                </button>
+              </>
+            ) : (
+              <p className="text-sm text-[#9aa39a]">Run analysis first.</p>
+            )}
+          </section>
+        )}
+
+        {screen === "restore" && (
+          <section className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 max-w-4xl">
+              <label className="text-sm">Preset
+                <select className="mt-1 w-full rounded-lg bg-[#0e1210] border border-white/10 px-2 py-2" value={preset} onChange={(e) => setPreset(e.target.value as Preset)}>
+                  <option value="natural">Natural</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="enhanced">Enhanced</option>
+                </select>
+              </label>
+              <label className="text-sm">Strength {strength.toFixed(2)}
+                <input type="range" min={0} max={1} step={0.05} value={strength} onChange={(e) => setStrength(Number(e.target.value))} className="mt-3 w-full" />
+              </label>
+              <label className="text-sm">Loudness {loudness} LUFS
+                <input type="range" min={-23} max={-14} step={1} value={loudness} onChange={(e) => setLoudness(Number(e.target.value))} className="mt-3 w-full" />
+              </label>
+              {showSpeech ? (
+                <label className="text-sm">Speech clarity {speechClarity.toFixed(2)}
+                  <input type="range" min={0} max={1} step={0.05} value={speechClarity} onChange={(e) => setSpeechClarity(Number(e.target.value))} className="mt-3 w-full" />
+                </label>
+              ) : null}
+              <label className="text-sm">Ambience preservation {ambience.toFixed(2)}
+                <input type="range" min={0} max={1} step={0.05} value={ambience} onChange={(e) => setAmbience(Number(e.target.value))} className="mt-3 w-full" />
+              </label>
+              <label className="text-sm">Noise reduction {noiseReduction.toFixed(2)}
+                <input type="range" min={0} max={1} step={0.05} value={noiseReduction} onChange={(e) => setNoiseReduction(Number(e.target.value))} className="mt-3 w-full" />
+              </label>
+              {showMusic ? (
+                <label className="text-sm text-[#9aa39a]">Music enhancement (macro reserved)</label>
+              ) : null}
+            </div>
+            <label className="flex items-center gap-2 text-xs text-[#9aa39a]">
+              <input type="checkbox" checked={advanced} onChange={(e) => setAdvanced(e.target.checked)} /> Show advanced / all macros
+            </label>
+            {contentLabel === "music_dominant" ? (
+              <p className="text-xs text-[#c4a35a]">Speech enhancer blocked on music-dominant regions unless gated.</p>
+            ) : null}
+            <div className="flex gap-2">
+              <button type="button" className="rounded-lg bg-[#6fbf8a] text-[#0e1210] px-3 py-2 text-sm font-semibold disabled:opacity-40" disabled={!items.length || busy} onClick={() => void processQueue()}>
+                Restore full / Process all
+              </button>
+              <button type="button" className="rounded-lg border border-red-400/40 text-red-200 px-3 py-2 text-sm" onClick={() => { cancelAllRef.current = true; toast("Cancel requested"); }}>
+                Cancel all
+              </button>
+            </div>
+            <QueueTable items={items} selectedId={selectedId} onSelect={setSelectedId} />
+          </section>
+        )}
+
+        {screen === "ab" && (
+          <section className="space-y-4 max-w-2xl">
+            <h2 className="text-lg">A/B preview</h2>
+            {selected ? (
+              <>
+                <div className="text-sm break-all">{selected.name}</div>
+                <div className="flex gap-2 items-center">
+                  <button type="button" className={`rounded-lg px-3 py-2 text-sm ${abMode === "A" ? "bg-white/15" : "border border-white/15"}`} onClick={() => setAbMode("A")}>A Original</button>
+                  <button type="button" className={`rounded-lg px-3 py-2 text-sm ${abMode === "B" ? "bg-[#6fbf8a] text-[#0e1210] font-semibold" : "border border-white/15"}`} onClick={() => setAbMode("B")}>B Restored</button>
+                  <label className="ml-auto flex items-center gap-2 text-xs text-[#9aa39a]">
+                    <input type="checkbox" checked={loudnessMatch} onChange={(e) => setLoudnessMatch(e.target.checked)} /> Loudness match
+                  </label>
+                </div>
+                <audio ref={audioRef} controls className="w-full" />
+                <p className="text-xs text-[#9aa39a]">Keys: press A / B mentally while switching — residual mode deferred to V2 spectrogram.</p>
+                <button type="button" className="rounded-lg bg-[#c4a35a] text-[#0e1210] px-3 py-2 text-sm font-semibold" onClick={() => setScreen("export")}>Approve & export</button>
+              </>
+            ) : (
+              <p className="text-sm text-[#9aa39a]">Select a restored item.</p>
+            )}
+          </section>
+        )}
+
+        {screen === "export" && (
+          <section className="space-y-4 max-w-xl">
+            <h2 className="text-lg">Export center</h2>
+            <p className="text-sm text-[#9aa39a]">Mode: Video remux (stream-copy) · AAC audio. Output folder below.</p>
+            <div className="text-xs break-all">Output: {outputDir}</div>
+            <button type="button" className="rounded-lg border border-white/15 px-3 py-2 text-sm" onClick={async () => {
+              const dir = await window.audiorestorer.chooseOutput();
+              if (dir) { await window.audiorestorer.ensureOutputDir(dir); setOutputDir(dir); }
+            }}>Choose output folder</button>
+            {selected?.outputPath ? (
+              <div className="space-y-2">
+                <div className="flex gap-2 text-xs">
+                  <span className="px-2 py-1 rounded bg-[#6fbf8a]/20 text-[#6fbf8a]">sync OK</span>
+                  <span className="px-2 py-1 rounded bg-white/10">restored ready</span>
+                </div>
+                <button type="button" className="underline text-sm" onClick={() => void window.audiorestorer.showItem(selected.outputPath!)}>Show in folder</button>
+              </div>
+            ) : (
+              <p className="text-sm text-[#9aa39a]">Restore a file to export.</p>
+            )}
+          </section>
+        )}
+
+        {screen === "models" && (
+          <section className="space-y-4">
+            <h2 className="text-lg">Model management</h2>
+            <table className="w-full text-sm">
+              <thead className="text-[#9aa39a] text-left">
+                <tr><th className="py-2">Name</th><th>Phase</th><th>State</th><th>License</th></tr>
+              </thead>
+              <tbody>
+                {models.map((m) => (
+                  <tr key={String(m.id)} className="border-t border-white/5">
+                    <td className="py-2">{String(m.name)}</td>
+                    <td>{String(m.phase).toUpperCase()}</td>
+                    <td>{String(m.state)}</td>
+                    <td className="text-xs text-[#9aa39a]">{String(m.license_notice)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-xs text-[#9aa39a]">V2 Demucs / V3 AudioSR stay optional — accept license notice before install (not bundled).</p>
+          </section>
+        )}
+
+        {screen === "settings" && (
+          <section className="space-y-4 max-w-md">
+            <h2 className="text-lg">Settings</h2>
+            <label className="text-sm block">Device
+              <select className="mt-1 w-full rounded-lg bg-[#0e1210] border border-white/10 px-2 py-2" value={device} onChange={(e) => setDevice(e.target.value)}>
+                <option value="auto">Auto</option>
+                <option value="cpu">CPU</option>
+                <option value="cuda">CUDA</option>
+              </select>
+            </label>
+            <label className="text-sm block">Default preset
+              <select className="mt-1 w-full rounded-lg bg-[#0e1210] border border-white/10 px-2 py-2" value={preset} onChange={(e) => setPreset(e.target.value as Preset)}>
                 <option value="natural">Natural</option>
                 <option value="balanced">Balanced</option>
                 <option value="enhanced">Enhanced</option>
               </select>
             </label>
-            <label className="text-sm">
-              <span className="text-[#9aa39a]">Strength {strength.toFixed(2)}</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={strength}
-                onChange={(e) => setStrength(Number(e.target.value))}
-                className="mt-3 w-full"
-              />
-            </label>
-            <label className="text-sm">
-              <span className="text-[#9aa39a]">Loudness {loudness} LUFS</span>
-              <input
-                type="range"
-                min={-23}
-                max={-14}
-                step={1}
-                value={loudness}
-                onChange={(e) => setLoudness(Number(e.target.value))}
-                className="mt-3 w-full"
-              />
-            </label>
-          </div>
-
-          <div className="flex-1 overflow-auto rounded-xl border border-white/5">
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-[#121714] text-[#9aa39a] text-left">
-                <tr>
-                  <th className="px-3 py-2 font-medium">File</th>
-                  <th className="px-3 py-2 font-medium">Status</th>
-                  <th className="px-3 py-2 font-medium">Progress</th>
-                  <th className="px-3 py-2 font-medium">Tags</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((it) => (
-                  <tr
-                    key={it.id}
-                    onClick={() => setSelectedId(it.id)}
-                    className={`border-t border-white/5 cursor-pointer ${
-                      selectedId === it.id ? "bg-white/5" : "hover:bg-white/[0.03]"
-                    }`}
-                  >
-                    <td className="px-3 py-2 break-all">{it.name}</td>
-                    <td className="px-3 py-2 capitalize">{it.state}</td>
-                    <td className="px-3 py-2 min-w-[140px]">
-                      <div className="h-2 rounded bg-black/40 overflow-hidden">
-                        <div
-                          className="h-full bg-[#6fbf8a]"
-                          style={{ width: `${Math.round(it.progress * 100)}%` }}
-                        />
-                      </div>
-                      <div className="text-[11px] text-[#9aa39a] mt-1">
-                        {it.stage || it.message || "—"}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2">
-                      {it.dfn ? (
-                        <span className="text-[11px] px-2 py-0.5 rounded bg-[#c4a35a]/20 text-[#c4a35a]">
-                          DFN
-                        </span>
-                      ) : it.state === "completed" ? (
-                        <span className="text-[11px] px-2 py-0.5 rounded bg-white/10">DSP</span>
-                      ) : null}
-                      {it.label ? (
-                        <span className="ml-1 text-[11px] text-[#9aa39a]">{it.label}</span>
-                      ) : null}
-                    </td>
-                  </tr>
-                ))}
-                {!items.length ? (
-                  <tr>
-                    <td colSpan={4} className="px-3 py-8 text-center text-[#9aa39a]">
-                      Add files or a folder to start a batch.
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <section className="rounded-2xl border border-white/10 bg-[#171c19]/90 p-5 flex flex-col gap-4">
-          <h2 className="text-sm tracking-wide uppercase text-[#9aa39a]">A/B preview</h2>
-          {selected ? (
-            <>
-              <div className="text-sm break-all">{selected.name}</div>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  className={`rounded-lg px-3 py-2 text-sm ${
-                    abMode === "A" ? "bg-white/15" : "border border-white/15"
-                  }`}
-                  onClick={() => setAbMode("A")}
-                >
-                  A Original
-                </button>
-                <button
-                  type="button"
-                  className={`rounded-lg px-3 py-2 text-sm ${
-                    abMode === "B" ? "bg-[#6fbf8a] text-[#0e1210] font-semibold" : "border border-white/15"
-                  }`}
-                  onClick={() => setAbMode("B")}
-                >
-                  B Restored
-                </button>
-                <label className="ml-auto flex items-center gap-2 text-xs text-[#9aa39a]">
-                  <input
-                    type="checkbox"
-                    checked={loudnessMatch}
-                    onChange={(e) => setLoudnessMatch(e.target.checked)}
-                  />
-                  Loudness match
-                </label>
-              </div>
-              <audio ref={audioRef} controls className="w-full" />
-              <div className="text-xs text-[#9aa39a] space-y-1">
-                <div>Stage: {selected.stage || "—"}</div>
-                <div>Message: {selected.message || selected.error || "—"}</div>
-                {selected.outputPath ? (
-                  <button
-                    type="button"
-                    className="underline"
-                    onClick={() => void window.audiorestorer.showItem(selected.outputPath!)}
-                  >
-                    Show output
-                  </button>
-                ) : null}
-              </div>
-              <button
-                type="button"
-                onClick={() => void cancelSelected()}
-                disabled={!selected.jobId || selected.state === "completed"}
-                className="rounded-lg border border-white/15 px-3 py-2 text-sm disabled:opacity-40"
-              >
-                Cancel selected
-              </button>
-            </>
-          ) : (
-            <p className="text-sm text-[#9aa39a]">Select a queue item to preview A/B audio.</p>
-          )}
-          <p className="text-xs text-[#9aa39a] mt-auto">
-            4K HEVC video is not played in-app (keeps UI smooth). Compare audio here, open the remuxed
-            MP4 in your video player for picture + sound.
-          </p>
-        </section>
+            <button type="button" className="rounded-lg bg-[#c4a35a] text-[#0e1210] px-3 py-2 text-sm font-semibold" onClick={() => void saveSettings()}>Save</button>
+            <p className="text-xs text-[#9aa39a]">About: AudioRestorer AI · GPL-3.0-or-later · FFmpeg GPL essentials shipped with installer.</p>
+          </section>
+        )}
       </main>
+    </div>
+  );
+}
+
+function QueueTable({
+  items,
+  selectedId,
+  onSelect,
+}: {
+  items: QueueItem[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <div className="overflow-auto rounded-xl border border-white/5">
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-[#121714] text-[#9aa39a] text-left">
+          <tr>
+            <th className="px-3 py-2 font-medium">File</th>
+            <th className="px-3 py-2 font-medium">Status</th>
+            <th className="px-3 py-2 font-medium">Progress</th>
+            <th className="px-3 py-2 font-medium">Tags</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((it) => (
+            <tr key={it.id} onClick={() => onSelect(it.id)} className={`border-t border-white/5 cursor-pointer ${selectedId === it.id ? "bg-white/5" : ""}`}>
+              <td className="px-3 py-2 break-all">{it.name}</td>
+              <td className="px-3 py-2 capitalize">{it.state}</td>
+              <td className="px-3 py-2 min-w-[140px]">
+                <div className="h-2 rounded bg-black/40 overflow-hidden">
+                  <div className="h-full bg-[#6fbf8a]" style={{ width: `${Math.round(it.progress * 100)}%` }} />
+                </div>
+              </td>
+              <td className="px-3 py-2 text-xs">
+                {it.dfn ? <span className="px-2 py-0.5 rounded bg-[#c4a35a]/20 text-[#c4a35a]">DFN</span> : null}
+                {it.label ? <span className="ml-1 text-[#9aa39a]">{it.label}</span> : null}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
