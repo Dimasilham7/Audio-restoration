@@ -25,6 +25,13 @@ hiddenimports = [
     "pedalboard",
     "multipart",
     "email.mime",
+    "audiorestorer_engine",
+    "audiorestorer_engine.api",
+    "audiorestorer_engine.api.app",
+    "audiorestorer_engine.api.jobs",
+    "audiorestorer_engine.cli",
+    "audiorestorer_engine.pipeline.restore",
+    "audiorestorer_engine.adapters.deepfilternet",
 ]
 
 # soundfile needs libsndfile

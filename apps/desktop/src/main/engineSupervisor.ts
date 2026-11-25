@@ -1,6 +1,7 @@
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { binDir, deepFilterExe, engineDir, frozenEngineExe, isPackaged } from "./paths";
 
 export type EngineInfo = {
@@ -21,6 +22,27 @@ const state: SupervisorState = {
   starting: null,
 };
 
+function resolveUv(): string {
+  if (process.platform !== "win32") return "uv";
+  const candidates = [
+    process.env.UV_PATH,
+    "uv.exe",
+    "uv",
+    ...(process.env.USERPROFILE
+      ? [
+          `${process.env.USERPROFILE}\\.local\\bin\\uv.exe`,
+          `${process.env.USERPROFILE}\\.cargo\\bin\\uv.exe`,
+          `${process.env.LOCALAPPDATA}\\Programs\\uv\\uv.exe`,
+        ]
+      : []),
+  ].filter(Boolean) as string[];
+  for (const c of candidates) {
+    if (c === "uv" || c === "uv.exe") continue;
+    if (existsSync(c)) return c;
+  }
+  return "uv.exe";
+}
+
 function buildEnv(token: string): NodeJS.ProcessEnv {
   const bin = binDir();
   const dfn = deepFilterExe();
@@ -29,6 +51,9 @@ function buildEnv(token: string): NodeJS.ProcessEnv {
     ...process.env,
     AUDIORESTORER_TOKEN: token,
     AUDIORESTORER_BIN_DIR: bin,
+    PYTHONUTF8: "1",
+    PYTHONIOENCODING: "utf-8",
+    PYTHONUNBUFFERED: "1",
     ...(dfn ? { AUDIORESTORER_DFN_EXE: dfn } : {}),
     PATH: `${bin}${pathSep}${process.env.PATH ?? ""}`,
   };
@@ -57,7 +82,7 @@ async function startEngine(): Promise<EngineInfo> {
       windowsHide: true,
     });
   } else {
-    const uv = process.platform === "win32" ? "uv.exe" : "uv";
+    const uv = resolveUv();
     child = spawn(
       uv,
       ["run", "audiorestorer-engine", "serve", "--host", "127.0.0.1", "--port", "0", "--token", token],
@@ -71,27 +96,36 @@ async function startEngine(): Promise<EngineInfo> {
   }
 
   state.child = child;
-  // Prevent stderr pipe from filling and blocking the engine
-  child.stderr.on("data", () => {});
-
-  const port = await waitForReady(child, 30_000);
-  const info: EngineInfo = {
-    port,
-    token,
-    baseUrl: `http://127.0.0.1:${port}`,
-  };
-  state.info = info;
-
-  child.on("exit", () => {
-    if (state.child === child) {
-      state.child = null;
-      state.info = null;
-    }
+  let stderrBuf = "";
+  child.stderr.on("data", (d) => {
+    stderrBuf += String(d);
+    if (stderrBuf.length > 8000) stderrBuf = stderrBuf.slice(-8000);
   });
 
-  // Health probe
-  await waitHealth(info, 15_000);
-  return info;
+  try {
+    const port = await waitForReady(child, 45_000);
+    const info: EngineInfo = {
+      port,
+      token,
+      baseUrl: `http://127.0.0.1:${port}`,
+    };
+    state.info = info;
+
+    child.on("exit", () => {
+      if (state.child === child) {
+        state.child = null;
+        state.info = null;
+      }
+    });
+
+    await waitHealth(info, 15_000);
+    return info;
+  } catch (err) {
+    const detail = stderrBuf.trim().slice(-1500);
+    const msg = err instanceof Error ? err.message : String(err);
+    stopEngine();
+    throw new Error(detail ? `${msg}\n${detail}` : msg);
+  }
 }
 
 function waitForReady(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<number> {
@@ -146,10 +180,7 @@ async function waitHealth(info: EngineInfo, timeoutMs: number): Promise<void> {
   throw new Error("Engine health check timeout");
 }
 
-export async function engineFetch(
-  path: string,
-  init: RequestInit = {},
-): Promise<Response> {
+export async function engineFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const info = await ensureEngine();
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${info.token}`);
@@ -161,7 +192,7 @@ export async function engineFetch(
 
 export function stopEngine(): void {
   if (state.child && !state.child.killed) {
-    if (process.platform === "win32") {
+    if (process.platform === "win32" && state.child.pid) {
       spawn("taskkill", ["/pid", String(state.child.pid), "/T", "/F"], {
         shell: false,
         windowsHide: true,

@@ -108,10 +108,13 @@ def serve(
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind((host, 0))
             port = int(s.getsockname()[1])
-    # Printed again from FastAPI startup once the server is accepting connections.
+    # Pass the app object directly so PyInstaller frozen builds do not need
+    # uvicorn's string import of audiorestorer_engine.api.app.
     os.environ["AUDIORESTORER_PORT"] = str(port)
+    from audiorestorer_engine.api.app import app as fastapi_app
+
     uvicorn.run(
-        "audiorestorer_engine.api.app:app",
+        fastapi_app,
         host=host,
         port=port,
         reload=False,
