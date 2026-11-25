@@ -80,7 +80,7 @@ def test_music_blocks_speech_denoise():
 def test_music_with_speech_enables_gated_dfn():
     a = _analysis_with_hum()
     a.timeline[0].label = ContentLabel.music_dominant
-    a.timeline[0].content = {"speech": 0.35, "music": 0.55, "ambience": 0.1}
+    a.timeline[0].content = {"speech": 0.4, "music": 0.5, "ambience": 0.1}
     a.issues.append(
         AnalysisIssue(
             id="hiss",

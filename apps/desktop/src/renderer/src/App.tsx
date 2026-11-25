@@ -27,11 +27,13 @@ export default function App() {
   const [items, setItems] = useState<QueueItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [preset, setPreset] = useState<Preset>("balanced");
-  const [strength, setStrength] = useState(0.6);
+  const [strength, setStrength] = useState(0.7);
   const [loudness, setLoudness] = useState(-16);
-  const [speechClarity, setSpeechClarity] = useState(0.5);
+  const [speechClarity, setSpeechClarity] = useState(0.55);
   const [ambience, setAmbience] = useState(0.5);
-  const [noiseReduction, setNoiseReduction] = useState(0.6);
+  const [noiseReduction, setNoiseReduction] = useState(0.55);
+  const [trebleRecovery, setTrebleRecovery] = useState(0.6);
+  const [musicEnhancement, setMusicEnhancement] = useState(0.55);
   const [outputDir, setOutputDir] = useState("");
   const [busy, setBusy] = useState(false);
   const [engineReady, setEngineReady] = useState(false);
@@ -40,7 +42,8 @@ export default function App() {
   const [schemaVersions, setSchemaVersions] = useState<number[]>([]);
   const [device, setDevice] = useState("auto");
   const [abMode, setAbMode] = useState<"A" | "B">("B");
-  const [loudnessMatch, setLoudnessMatch] = useState(true);
+  // Off by default: matching often masks EQ/NR differences in A/B
+  const [loudnessMatch, setLoudnessMatch] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [toasts, setToasts] = useState<string[]>([]);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -54,6 +57,45 @@ export default function App() {
 
   function toast(msg: string) {
     setToasts((t) => [msg, ...t].slice(0, 4));
+  }
+
+  function applyPresetDefaults(next: Preset) {
+    setPreset(next);
+    if (next === "natural") {
+      setStrength(0.4);
+      setNoiseReduction(0.35);
+      setTrebleRecovery(0.35);
+      setSpeechClarity(0.4);
+      setAmbience(0.75);
+      setMusicEnhancement(0.35);
+    } else if (next === "balanced") {
+      setStrength(0.7);
+      setNoiseReduction(0.55);
+      setTrebleRecovery(0.6);
+      setSpeechClarity(0.55);
+      setAmbience(0.5);
+      setMusicEnhancement(0.55);
+    } else {
+      setStrength(0.9);
+      setNoiseReduction(0.8);
+      setTrebleRecovery(0.85);
+      setSpeechClarity(0.75);
+      setAmbience(0.3);
+      setMusicEnhancement(0.75);
+    }
+  }
+
+  function restorationSettings() {
+    return {
+      preset,
+      strength,
+      loudness_target_lufs: loudness,
+      noise_reduction: noiseReduction,
+      speech_clarity: speechClarity,
+      ambience_preservation: ambience,
+      treble_recovery: trebleRecovery,
+      music_enhancement: musicEnhancement,
+    };
   }
 
   useEffect(() => {
@@ -227,12 +269,7 @@ export default function App() {
           kind: "process",
           mediaPath: item.path,
           outputPath,
-          settings: {
-            preset,
-            strength,
-            loudness_target_lufs: loudness,
-            noise_reduction: noiseReduction,
-          },
+          settings: restorationSettings(),
         });
         const jobId = String(job.id);
         setItems((prev) =>
@@ -460,7 +497,7 @@ export default function App() {
           <section className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3 max-w-4xl">
               <label className="text-sm">Preset
-                <select className="mt-1 w-full rounded-lg bg-[#0e1210] border border-white/10 px-2 py-2" value={preset} onChange={(e) => setPreset(e.target.value as Preset)}>
+                <select className="mt-1 w-full rounded-lg bg-[#0e1210] border border-white/10 px-2 py-2" value={preset} onChange={(e) => applyPresetDefaults(e.target.value as Preset)}>
                   <option value="natural">Natural</option>
                   <option value="balanced">Balanced</option>
                   <option value="enhanced">Enhanced</option>
@@ -483,8 +520,15 @@ export default function App() {
               <label className="text-sm">Noise reduction {noiseReduction.toFixed(2)}
                 <input type="range" min={0} max={1} step={0.05} value={noiseReduction} onChange={(e) => setNoiseReduction(Number(e.target.value))} className="mt-3 w-full" />
               </label>
-              {showMusic ? (
-                <label className="text-sm text-[#9aa39a]">Music enhancement (macro reserved)</label>
+              {showMusic || advanced ? (
+                <label className="text-sm">Music enhancement {musicEnhancement.toFixed(2)}
+                  <input type="range" min={0} max={1} step={0.05} value={musicEnhancement} onChange={(e) => setMusicEnhancement(Number(e.target.value))} className="mt-3 w-full" />
+                </label>
+              ) : null}
+              {advanced ? (
+                <label className="text-sm">Treble recovery {trebleRecovery.toFixed(2)}
+                  <input type="range" min={0} max={1} step={0.05} value={trebleRecovery} onChange={(e) => setTrebleRecovery(Number(e.target.value))} className="mt-3 w-full" />
+                </label>
               ) : null}
             </div>
             <label className="flex items-center gap-2 text-xs text-[#9aa39a]">
@@ -514,12 +558,15 @@ export default function App() {
                 <div className="flex gap-2 items-center">
                   <button type="button" className={`rounded-lg px-3 py-2 text-sm ${abMode === "A" ? "bg-white/15" : "border border-white/15"}`} onClick={() => setAbMode("A")}>A Original</button>
                   <button type="button" className={`rounded-lg px-3 py-2 text-sm ${abMode === "B" ? "bg-[#6fbf8a] text-[#0e1210] font-semibold" : "border border-white/15"}`} onClick={() => setAbMode("B")}>B Restored</button>
-                  <label className="ml-auto flex items-center gap-2 text-xs text-[#9aa39a]">
+                  <label className="ml-auto flex items-center gap-2 text-xs text-[#9aa39a]" title="Matching level often hides EQ/NR changes">
                     <input type="checkbox" checked={loudnessMatch} onChange={(e) => setLoudnessMatch(e.target.checked)} /> Loudness match
                   </label>
                 </div>
                 <audio ref={audioRef} controls className="w-full" />
-                <p className="text-xs text-[#9aa39a]">Keys: press A / B mentally while switching — residual mode deferred to V2 spectrogram.</p>
+                <p className="text-xs text-[#9aa39a]">
+                  Tip: leave Loudness match off to hear EQ/noise changes. Use Enhanced for a stronger A/B.
+                  {loudnessMatch ? " Match on ≈ same loudness — differences can sound subtle." : ""}
+                </p>
                 <button type="button" className="rounded-lg bg-[#c4a35a] text-[#0e1210] px-3 py-2 text-sm font-semibold" onClick={() => setScreen("export")}>Approve & export</button>
               </>
             ) : (
@@ -584,7 +631,7 @@ export default function App() {
               </select>
             </label>
             <label className="text-sm block">Default preset
-              <select className="mt-1 w-full rounded-lg bg-[#0e1210] border border-white/10 px-2 py-2" value={preset} onChange={(e) => setPreset(e.target.value as Preset)}>
+              <select className="mt-1 w-full rounded-lg bg-[#0e1210] border border-white/10 px-2 py-2" value={preset} onChange={(e) => applyPresetDefaults(e.target.value as Preset)}>
                 <option value="natural">Natural</option>
                 <option value="balanced">Balanced</option>
                 <option value="enhanced">Enhanced</option>

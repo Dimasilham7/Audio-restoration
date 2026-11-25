@@ -16,9 +16,9 @@ from audiorestorer_engine.schemas import (
 )
 
 _PRESET_STRENGTH = {
-    Preset.natural: 0.35,
-    Preset.balanced: 0.6,
-    Preset.enhanced: 0.85,
+    Preset.natural: 0.4,
+    Preset.balanced: 0.7,
+    Preset.enhanced: 0.95,
 }
 
 
@@ -29,10 +29,16 @@ def plan(
     settings = settings or RestorationSettings()
     preset = settings.preset
     strength = settings.strength if settings.strength else _PRESET_STRENGTH[preset]
+    # Preset pushes effective strength so Enhanced is clearly more audible
+    preset_boost = {Preset.natural: 0.85, Preset.balanced: 1.05, Preset.enhanced: 1.25}[preset]
+    strength = float(min(1.0, strength * preset_boost))
+
     issues = {i.id: i for i in analysis.issues}
-    label = (
-        analysis.timeline[0].label if analysis.timeline else ContentLabel.mixed
-    )
+    label = analysis.timeline[0].label if analysis.timeline else ContentLabel.mixed
+    speech_p = float(analysis.timeline[0].content.get("speech", 0.0)) if analysis.timeline else 0.0
+    music_p = float(analysis.timeline[0].content.get("music", 0.0)) if analysis.timeline else 0.0
+    hf_ratio = float(analysis.global_metrics.spectral.get("hf_ratio", 0.2))
+    lufs = float(analysis.global_metrics.loudness.integrated_lufs)
 
     stages: list[PlannedStage] = []
     warnings: list[str] = []
@@ -74,9 +80,9 @@ def plan(
     )
 
     wind = issues.get("wind")
-    wind_cut = 80.0 + 40.0 * strength
+    wind_cut = 70.0 + 50.0 * strength
     if label == ContentLabel.music_dominant:
-        wind_cut = min(wind_cut, 60.0)
+        wind_cut = min(wind_cut, 55.0)
         if wind and wind.confidence >= 0.55:
             warnings.append("Wind HPF limited to protect music bass.")
     stages.append(
@@ -92,33 +98,28 @@ def plan(
     hiss = issues.get("hiss")
     noise_issue = hiss or wind or issues.get("background_noise")
 
-    # Attenuation limits by preset (plan doc); ambience preservation lowers strength
     atten_by_preset = {
-        Preset.natural: 6.0,
-        Preset.balanced: 12.0,
-        Preset.enhanced: 18.0,
+        Preset.natural: 8.0,
+        Preset.balanced: 14.0,
+        Preset.enhanced: 20.0,
     }
-    atten = atten_by_preset[preset] * (0.55 + 0.45 * settings.noise_reduction)
-    atten *= 1.0 - 0.4 * settings.ambience_preservation
+    atten = atten_by_preset[preset] * (0.5 + 0.5 * settings.noise_reduction)
+    atten *= 1.0 - 0.35 * settings.ambience_preservation
+    if noise_issue:
+        atten *= 0.75 + 0.5 * float(noise_issue.severity)
     atten = float(max(0.0, min(24.0, atten)))
-    # speech clarity pushes a bit more reduction on speech content
     if label == ContentLabel.speech_dominant:
-        atten = min(24.0, atten + 3.0 * settings.speech_clarity * strength)
-
-    speech_p = 0.0
-    if analysis.timeline:
-        speech_p = float(analysis.timeline[0].content.get("speech", 0.0))
+        atten = min(24.0, atten + 4.0 * settings.speech_clarity * strength)
 
     speech_denoise = False
     speech_reason = "Speech denoise not indicated"
     speech_conf = 0.0
-    use_vad_gate = label == ContentLabel.mixed
+    use_vad_gate = label in (ContentLabel.mixed, ContentLabel.music_dominant)
 
-    if label == ContentLabel.music_dominant and speech_p < 0.22:
+    if label == ContentLabel.music_dominant and speech_p < 0.32:
         speech_reason = "Blocked: music-dominant - never apply speech enhancer to music"
         speech_conf = 0.9
-    elif label == ContentLabel.music_dominant and speech_p >= 0.22 and noise_issue:
-        # Phone concert / live: some speech under music - only via VAD gate
+    elif label == ContentLabel.music_dominant and speech_p >= 0.32 and noise_issue:
         speech_denoise = True
         use_vad_gate = True
         speech_conf = float(noise_issue.confidence) * 0.8
@@ -126,20 +127,19 @@ def plan(
             f"Gated DeepFilterNet3 (speech~{speech_p:.2f} under music; atten<={atten:.0f} dB)"
         )
     elif label in (ContentLabel.speech_dominant, ContentLabel.mixed):
-        if noise_issue and noise_issue.confidence >= 0.45:
+        if noise_issue and noise_issue.confidence >= 0.5:
             speech_denoise = True
             speech_conf = float(noise_issue.confidence)
             speech_reason = (
                 f"DeepFilterNet3 on speech regions (atten<={atten:.0f} dB); "
-                f"gated for mixed content"
+                f"{'VAD-gated' if use_vad_gate else 'full'}"
             )
-        elif label == ContentLabel.speech_dominant and settings.noise_reduction >= 0.35:
+        elif label == ContentLabel.speech_dominant and settings.noise_reduction >= 0.3:
             speech_denoise = True
             speech_conf = 0.55
             speech_reason = f"Speech-dominant with NR request (atten<={atten:.0f} dB)"
-        use_vad_gate = label == ContentLabel.mixed or use_vad_gate
+        use_vad_gate = label != ContentLabel.speech_dominant or use_vad_gate
 
-    # Import deferred availability check only for reason text
     try:
         from audiorestorer_engine.adapters.deepfilternet import is_available as dfn_available
 
@@ -165,59 +165,99 @@ def plan(
         )
     )
 
+    # Music gate: stronger when hissy music and DFN not used
     gate_on = bool(
         hiss
         and hiss.confidence >= 0.55
         and label in (ContentLabel.music_dominant, ContentLabel.mixed, ContentLabel.ambience)
-        and not speech_denoise  # avoid stacking aggressive NR
+        and not speech_denoise
     )
+    gate_db = -4.0 - 8.0 * settings.noise_reduction * strength
+    if gate_on and preset == Preset.enhanced:
+        gate_db -= 2.0
     stages.append(
         PlannedStage(
             id=StageId.denoise_music_gate,
             enabled=gate_on,
-            reason="Gentle high-shelf cut on noise floor" if gate_on else "No music hiss gate",
+            reason=(
+                f"High-shelf noise-floor cut ({gate_db:.1f} dB)"
+                if gate_on
+                else "No music hiss gate"
+            ),
             confidence=hiss.confidence if hiss else 0.0,
-            params={"reduction_db": -3.0 - 6.0 * settings.noise_reduction * strength},
+            params={"reduction_db": gate_db},
         )
     )
 
     muffled = issues.get("muffled")
+    presence_ratio = float(analysis.global_metrics.spectral.get("presence_ratio", 0.1))
     treble_gain = 0.0
-    if muffled and muffled.confidence >= 0.45:
-        treble_gain = min(9.0, (4.0 + 6.0 * settings.treble_recovery) * strength)
-        # Cap by ambience preservation (less boost if preserving ambience noise)
-        treble_gain *= 1.0 - 0.35 * settings.ambience_preservation
+    if muffled and muffled.confidence >= 0.4:
+        # Audible recovery scaled by severity (presence-based)
+        depth = float(muffled.severity)
+        treble_gain = (4.0 + 8.0 * settings.treble_recovery) * strength * (0.45 + 0.55 * depth)
+        treble_gain *= 1.0 - 0.25 * settings.ambience_preservation
+        if preset == Preset.enhanced:
+            treble_gain *= 1.25
+        # Extra lift when presence band is especially thin
+        if presence_ratio < 0.025:
+            treble_gain *= 1.15
+        treble_gain = float(min(11.0, treble_gain))
+    elif label == ContentLabel.speech_dominant and settings.speech_clarity >= 0.55:
+        treble_gain = 2.5 * settings.speech_clarity * strength
+    elif (
+        label == ContentLabel.music_dominant
+        and settings.music_enhancement >= 0.55
+        and presence_ratio < 0.05
+        and preset != Preset.natural
+    ):
+        # Mild air for dull music beds even without a hard muffled flag
+        treble_gain = 2.0 * settings.music_enhancement * strength
     if label == ContentLabel.speech_dominant:
-        treble_gain *= 0.7 + 0.3 * settings.speech_clarity
+        treble_gain *= 0.75 + 0.35 * settings.speech_clarity
 
+    bass_db = float(settings.bass_balance) * 5.0 * strength
+    if label == ContentLabel.music_dominant and settings.music_enhancement >= 0.45:
+        # Mild musical body when user asks for music enhancement
+        bass_db += 1.5 * settings.music_enhancement * strength
+        if preset == Preset.enhanced:
+            bass_db += 1.0 * settings.music_enhancement
+
+    tonal_on = abs(treble_gain) >= 0.6 or abs(bass_db) >= 0.6
     stages.append(
         PlannedStage(
             id=StageId.tonal_eq,
-            enabled=treble_gain >= 0.5 or abs(settings.bass_balance) > 0.05,
-            reason="Tonal correction for muffling / balance",
-            confidence=muffled.confidence if muffled else 0.4,
+            enabled=tonal_on,
+            reason=(
+                f"Tonal EQ (treble {treble_gain:+.1f} dB, bass {bass_db:+.1f} dB)"
+                if tonal_on
+                else "No tonal correction needed"
+            ),
+            confidence=muffled.confidence if muffled else 0.35,
             params={
-                "high_shelf_hz": 3500.0,
+                "high_shelf_hz": 3200.0 if label == ContentLabel.speech_dominant else 3500.0,
                 "high_shelf_db": treble_gain,
                 "bass_hz": 120.0,
-                "bass_db": float(settings.bass_balance) * 4.0 * strength,
+                "bass_db": bass_db,
             },
         )
     )
 
     imbalance = issues.get("stereo_imbalance")
+    width = settings.stereo_width
+    if label == ContentLabel.music_dominant and settings.music_enhancement >= 0.6 and abs(width - 1.0) < 0.02:
+        width = 1.0 + 0.12 * settings.music_enhancement * strength
     stages.append(
         PlannedStage(
             id=StageId.stereo,
-            enabled=bool(imbalance and imbalance.confidence >= 0.55)
-            or abs(settings.stereo_width - 1.0) > 0.05,
+            enabled=bool(imbalance and imbalance.confidence >= 0.55) or abs(width - 1.0) > 0.04,
             reason="Stereo correction / width",
-            confidence=imbalance.confidence if imbalance else 0.5,
+            confidence=imbalance.confidence if imbalance else 0.45,
             params={
                 "lr_balance_db": (
                     imbalance.evidence.get("lr_balance_db", 0.0) if imbalance else 0.0
                 ),
-                "width": settings.stereo_width,
+                "width": width,
             },
         )
     )
@@ -225,7 +265,7 @@ def plan(
     stages.append(
         PlannedStage(
             id=StageId.dynamics,
-            enabled=preset == Preset.enhanced,
+            enabled=preset == Preset.enhanced and label != ContentLabel.ambience,
             reason="Light dynamics only in Enhanced preset",
             confidence=0.4,
             params={},
@@ -242,11 +282,22 @@ def plan(
         )
     )
 
+    # Loudness: skip if already very close (keeps A/B more about tone/noise)
+    loud_err = abs(lufs - settings.loudness_target_lufs) if lufs > -70 else 99.0
+    loud_on = loud_err >= 1.25 or preset == Preset.enhanced
+    if not loud_on:
+        warnings.append(
+            f"Loudness already near target ({lufs:.1f} vs {settings.loudness_target_lufs:.1f} LUFS); skipped."
+        )
     stages.append(
         PlannedStage(
             id=StageId.loudness,
-            enabled=True,
-            reason=f"Normalize toward {settings.loudness_target_lufs:.1f} LUFS",
+            enabled=loud_on,
+            reason=(
+                f"Normalize toward {settings.loudness_target_lufs:.1f} LUFS"
+                if loud_on
+                else "Loudness already near target"
+            ),
             confidence=1.0,
             params={"target_lufs": settings.loudness_target_lufs},
         )
@@ -263,7 +314,14 @@ def plan(
         )
     )
 
-    # Apply module overrides last
+    # Content-specific tip
+    if label == ContentLabel.music_dominant and speech_denoise:
+        warnings.append("Speech enhancer is VAD-gated so music beds stay protected.")
+    if label == ContentLabel.music_dominant and not speech_denoise and not gate_on and not tonal_on:
+        warnings.append("Clean-ish music bed: only light conditioning/limiting applied.")
+    if hf_ratio < 0.1 and muffled:
+        warnings.append("Phone/AAC may lack HF permanently; EQ cannot invent missing detail.")
+
     for stage in stages:
         override = settings.module_overrides.get(stage.id.value)
         if not override:
